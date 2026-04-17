@@ -4,53 +4,65 @@ import re
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="Elitery Tax Extractor v16", page_icon="🛡️")
-st.title("🛡️ Elitery Tax Extractor (The Guardian v16)")
+st.set_page_config(page_title="Elitery Tax Extractor v17", page_icon="🎯")
+st.title("🎯 Elitery Tax Extractor (Ultra-Precision v17)")
 
-def get_nearest_digits(text, keyword, length=10):
-    """Mencari deretan angka terdekat setelah kata kunci tertentu."""
-    part = text.split(keyword)[-1] if keyword in text else ""
-    match = re.search(r'(\d{' + str(length) + r',})', part)
-    return match.group(1) if match else "N/A"
+def clean_name_field(text):
+    """Membersihkan nama dari NITKU atau label sisa."""
+    if not text or text == "N/A": return "N/A"
+    # Hapus pola NITKU (22 digit) dan tanda hubung di depannya
+    text = re.sub(r'^\d{22}\s*-\s*', '', text)
+    # Hapus label umum
+    labels = ["NAMA PEMOTONG DAN/ATAU PEMUNGUT", "PPh", "DAN/ATAU PEMUNGUT", "NAMA :", ":"]
+    for l in labels:
+        text = re.sub(rf'(?i){l}', '', text)
+    return text.strip()
 
-def extract_surgical_v16(pdf_file):
+def extract_surgical_v17(pdf_file):
     try:
         with pdfplumber.open(pdf_file) as pdf:
             full_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
             if not full_text.strip():
                 return {"NOMOR_BPU": "ERROR: Scan/Kosong", "NAMA_FILE": pdf_file.name}
 
-            clean_text = re.sub(r'\s+', ' ', full_text)
+            # Bersihkan teks dasar
+            text_clean = re.sub(r' +', ' ', full_text)
             res = {}
 
             # --- 1. NOMOR BPU & MASA PAJAK ---
-            # Mencari Masa Pajak MM-YYYY [cite: 4]
-            masa = re.search(r'(\d{2}-202\d)', clean_text)
+            masa = re.search(r'(\d{2}-202\d)', text_clean)
             res['MASA_PAJAK'] = masa.group(1) if masa else "N/A"
             
-            # Mencari Nomor BPU (Cari kata 'NOMOR' atau 'BPPU' lalu ambil kode 9 digit terdekat) [cite: 3, 4]
-            nomor_search = re.search(r'(?:NOMOR|BPPU).*?([A-Z0-9]{8,12})', clean_text, re.I)
-            res['NOMOR_BPU'] = nomor_search.group(1) if (nomor_search and nomor_search.group(1) != "INDONESIA") else "N/A"
-            res['STATUS'] = "PEMBETULAN" if "PEMBETULAN" in clean_text.upper() else "NORMAL"
+            # Cari Nomor BPU: Kode 9 digit alfanumerik (Bukan UNIFIKASI/INDONESIA)
+            nomor = "N/A"
+            potential_nums = re.findall(r'\b[A-Z0-9]{9}\b', text_clean[:1000])
+            for n in potential_nums:
+                if any(c.isdigit() for c in n) and n not in ["UNIFIKASI", "INDONESIA", "PENERIMA"]:
+                    nomor = n
+                    break
+            res['NOMOR_BPU'] = nomor
+            res['STATUS'] = "PEMBETULAN" if "PEMBETULAN" in text_clean.upper() else "NORMAL"
 
             # --- 2. BAGIAN A (Penerima) ---
-            # A.1 NPWP: Cari angka 15-16 digit setelah label A.1 [cite: 10]
-            res['A.1_NPWP_NIK_PENERIMA'] = "'" + get_nearest_digits(clean_text, "A.1", 15)
+            # NPWP (15-16 digit)
+            a1 = re.search(r'A\.1.*?(\d{15,16})', text_clean, re.S)
+            res['A.1_NPWP_NIK_PENERIMA'] = "'" + a1.group(1) if a1 else "N/A"
             
-            # A.2 NAMA [cite: 10]
-            a2 = re.search(r'A\.2\s+NAMA\s*[:\s]*(.*?)\s+A\.3', clean_text, re.I | re.S)
+            # Nama Penerima
+            a2 = re.search(r'A\.2\s+NAMA\s*[:\s]*(.*?)(?:\s+A\.3|NPWP)', text_clean, re.I | re.S)
             res["A.2_NAMA_PENERIMA"] = a2.group(1).strip() if a2 else "N/A"
             
-            # A.3 NITKU: Cari angka panjang setelah label NITKU [cite: 10]
-            res["A.3_NITKU_PENERIMA"] = "'" + get_nearest_digits(clean_text, "NITKU", 16)
+            # NITKU Penerima (22 digit)
+            a3 = re.search(r'A\.3.*?(\d{22})', text_clean, re.S)
+            res["A.3_NITKU_PENERIMA"] = "'" + a3.group(1) if a3 else "N/A"
 
             # --- 3. BAGIAN B (Transaksi) ---
-            res["B.2_JENIS_PPH"] = "Pasal 23" if "Pasal 23" in clean_text else "N/A"
-            b3 = re.search(r'(\d{2}-\d{3}-\d{2})', clean_text) # [cite: 20]
+            res["B.2_JENIS_PPH"] = "Pasal 23" if "Pasal 23" in text_clean else "N/A"
+            b3 = re.search(r'(\d{2}-\d{3}-\d{2})', text_clean)
             res['B.3_KODE_OBJEK_PAJAK'] = b3.group(1) if b3 else "N/A"
 
-            # B.5 DPP & B.7 PPh (Mencari angka ribuan dengan titik) [cite: 24, 27]
-            money_vals = re.findall(r'(\d{1,3}(?:\.\d{3})+)', clean_text)
+            # DPP & PPh
+            money_vals = re.findall(r'(\d{1,3}(?:\.\d{3})+)', text_clean)
             if len(money_vals) >= 2:
                 res["B.5_DPP"] = money_vals[-2]
                 res["B.7_PPH_DIPOTONG"] = money_vals[-1]
@@ -59,32 +71,33 @@ def extract_surgical_v16(pdf_file):
                 res["B.7_PPH_DIPOTONG"] = "0"
 
             # --- 4. DOKUMEN DASAR ---
-            res["B.9_JENIS_DOKUMEN"] = re.search(r'Jenis Dokumen\s*[:\s]*(.*?)\s+Tanggal', clean_text, re.I).group(1).strip() if re.search(r'Jenis Dokumen\s*[:\s]*(.*?)\s+Tanggal', clean_text, re.I) else "N/A"
-            doc_num = re.search(r'Nomor Dokumen\s*[:\s]*(\d+)', clean_text, re.I)
+            res["B.9_JENIS_DOKUMEN"] = re.search(r'Jenis Dokumen\s*[:\s]*(.*?)\s+Tanggal', text_clean, re.I).group(1).strip() if re.search(r'Jenis Dokumen\s*[:\s]*(.*?)\s+Tanggal', text_clean, re.I) else "N/A"
+            doc_num = re.search(r'Nomor Dokumen\s*[:\s]*(\d+)', text_clean, re.I)
             res["B.10_NOMOR_DOKUMEN"] = "'" + doc_num.group(1) if doc_num else "N/A"
-            res["B.11_TANGGAL_DOKUMEN"] = re.search(r'Tanggal\s*[:\s]*(\d{2}\s\w+\s\d{4})', clean_text, re.I).group(1) if re.search(r'Tanggal\s*[:\s]*(\d{2}\s\w+\s\d{4})', clean_text, re.I) else "N/A"
+            res["B.11_TANGGAL_DOKUMEN"] = re.search(r'Tanggal\s*[:\s]*(\d{2}\s\w+\s\d{4})', text_clean, re.I).group(1) if re.search(r'Tanggal\s*[:\s]*(\d{2}\s\w+\s\d{4})', text_clean, re.I) else "N/A"
 
             # --- 5. BAGIAN C (Pemotong) ---
-            c_part = full_text.split('C. IDENTITAS')[-1] if 'C. IDENTITAS' in full_text else ""
-            c_clean = re.sub(r'\s+', ' ', c_part)
+            c_block = text_clean.split('C. IDENTITAS')[-1] if 'C. IDENTITAS' in text_clean else text_clean
             
-            # C.1 NPWP PEMOTONG 
-            res['C.1_NPWP_PEMOTONG'] = "'" + get_nearest_digits(c_clean, "C.1", 15)
+            # NPWP Pemotong (15-16 digit)
+            c1 = re.search(r'C\.1.*?(\d{15,16})', c_block, re.S)
+            res['C.1_NPWP_PEMOTONG'] = "'" + c1.group(1) if c1 else "N/A"
             
-            # C.2 NITKU PEMOTONG 
-            res['C.2_NITKU_PEMOTONG'] = "'" + get_nearest_digits(c_clean, "NITKU", 16)
+            # NITKU Pemotong (22 digit)
+            c2 = re.search(r'(\d{22})', c_block)
+            res['C.2_NITKU_PEMOTONG'] = "'" + c2.group(1) if c2 else "N/A"
             
-            # C.3 NAMA PEMOTONG 
-            c3_raw = re.search(r'PPh\s*[:\s]*(.*?)\s*C\.4', c_clean, re.I | re.S)
-            if c3_raw:
-                nama_raw = c3_raw.group(1).strip()
-                # Hapus angka NITKU yang mungkin menempel di depan nama
-                res["C.3_NAMA_PEMOTONG"] = re.sub(r'^[\d-]+\s*-\s*', '', nama_raw)
+            # Nama Pemotong (C.3)
+            # Mengambil nama yang bersih dari NITKU dan label
+            c3_match = re.search(r'C\.3\s+NAMA PEMOTONG.*?\n(.*?)\s+C\.4', c_block, re.S | re.I)
+            if c3_match:
+                res["C.3_NAMA_PEMOTONG"] = clean_name_field(c3_match.group(1))
             else:
-                res["C.3_NAMA_PEMOTONG"] = "N/A"
+                fallback_c3 = re.search(r'PPh\s*[:\s]*(.*?)\s*C\.4', c_block, re.I | re.S)
+                res["C.3_NAMA_PEMOTONG"] = clean_name_field(fallback_c3.group(1)) if fallback_c3 else "N/A"
             
-            res["C.4_TANGGAL_BPU"] = re.search(r'C\.4\s+TANGGAL\s*[:\s]*(\d{2}\s\w+\s\d{4})', c_clean).group(1) if re.search(r'C\.4\s+TANGGAL\s*[:\s]*(\d{2}\s\w+\s\d{4})', c_clean) else "N/A"
-            res["C.5_NAMA_PENANDATANGAN"] = re.search(r'C\.5\s+NAMA\s+PENANDATANGAN\s*[:\s]*(.*?)\s*(?:C\.6|$)', c_clean, re.S).group(1).strip() if re.search(r'C\.5\s+NAMA\s+PENANDATANGAN\s*[:\s]*(.*?)\s*(?:C\.6|$)', c_clean, re.S) else "N/A"
+            res["C.4_TANGGAL_BPU"] = re.search(r'C\.4\s+TANGGAL\s*[:\s]*(\d{2}\s\w+\s\d{4})', c_block).group(1) if re.search(r'C\.4\s+TANGGAL\s*[:\s]*(\d{2}\s\w+\s\d{4})', c_block) else "N/A"
+            res["C.5_NAMA_PENANDATANGAN"] = re.search(r'C\.5\s+NAMA\s+PENANDATANGAN\s*[:\s]*(.*?)(?:\s*C\.6|$)', c_block, re.S).group(1).strip() if re.search(r'C\.5\s+NAMA\s+PENANDATANGAN\s*[:\s]*(.*?)(?:\s*C\.6|$)', c_block, re.S) else "N/A"
 
             res["NAMA_FILE"] = pdf_file.name
             return res
@@ -98,15 +111,15 @@ if 'df_result' not in st.session_state:
 uploaded_files = st.file_uploader("Upload PDF Bukti Potong", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    if st.button("🚀 Jalankan Ekstraksi Versi 16"):
-        with st.spinner('Memproses data lengkap A.1 - C.5...'):
-            all_results = [extract_surgical_v16(f) for f in uploaded_files]
+    if st.button("🚀 Jalankan Ekstraksi Versi 17"):
+        with st.spinner('Memproses data...'):
+            all_results = [extract_surgical_v17(f) for f in uploaded_files]
             st.session_state.df_result = pd.DataFrame(all_results)
-            st.success("Selesai!")
+            st.success("Ekstraksi Berhasil!")
 
 if st.session_state.df_result is not None:
     st.dataframe(st.session_state.df_result)
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         st.session_state.df_result.to_excel(writer, index=False)
-    st.download_button(label="📥 Download Hasil Rekap (Excel)", data=output.getvalue(), file_name="Rekap_Pajak_Elitery_v16.xlsx")
+    st.download_button(label="📥 Download Hasil Rekap", data=output.getvalue(), file_name="Rekap_Pajak_Elitery_v17.xlsx")
